@@ -35,11 +35,11 @@ html,body{margin:0;background:var(--bg);color:var(--ink);
 main{max-width:640px;margin:0 auto;padding:0 16px 96px}
 header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);border-bottom:1px solid var(--line)}
 .hd{max-width:640px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;gap:10px}
-.hd h1{font-size:19px;margin:0;flex:1;letter-spacing:.02em}
+.hd h1{font-size:19px;margin:0;flex:1;letter-spacing:.02em;white-space:nowrap;min-width:0}
 input,select,textarea,button{font:inherit;color:inherit}
 input,select,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card);min-height:42px}
 textarea{min-height:140px}
-input[type=month]{width:auto;min-width:150px}
+input[type=month]{width:auto;min-width:0;max-width:52vw}
 input[type=checkbox]{width:20px;height:20px;min-height:0;accent-color:var(--accent)}
 button{cursor:pointer;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:9px 14px;min-height:42px}
 button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
@@ -117,6 +117,16 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .banner button{min-height:36px;padding:6px 12px}
 .month-hint{font-size:13px;color:var(--muted);margin-top:8px}
 .month-hint button{min-height:0;padding:2px 10px;font-size:13px}
+input::placeholder,textarea::placeholder{color:var(--muted);opacity:.5;font-weight:400}
+input,select,textarea{font-weight:600}
+input.miss,select.miss{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger)}
+.form small.fmt{font-size:12px;color:var(--muted);font-weight:400}
+.item.has-miss{border-color:var(--danger);box-shadow:inset 3px 0 0 var(--danger)}
+.miss-t{font-size:13px;color:var(--danger);font-weight:600}
+.miss-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.recheck{background:var(--warn-soft);color:var(--warn);border-radius:8px;padding:6px 10px;font-size:13px;margin-bottom:10px}
+a.photo{display:block;margin-bottom:10px}
+a.photo img{max-height:260px;max-width:100%;border-radius:8px;border:1px solid var(--line);display:block;margin:0 auto}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 @media (max-width:420px){.form{grid-template-columns:1fr}.sum b{font-size:16px}}
 </style>
@@ -212,6 +222,12 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     <button id="cropFull">整張自動辨識</button>
     <button class="primary" id="cropGo" disabled>辨識框選範圍</button>
   </div>
+</div></dialog>
+
+<dialog id="dlgMiss"><div class="dlg">
+  <div class="dlg-h"><h3>還有資料漏填</h3></div>
+  <div class="dlg-b" id="missBody"></div>
+  <div class="dlg-f"><button id="missGo">仍要匯出</button><button class="primary" id="missFix">回去補填</button></div>
 </div></dialog>
 
 <dialog id="dlgPreview"><div class="dlg">
@@ -332,23 +348,30 @@ async function decodeQRs(bitmap){
     if(found.some(s=>INV_RE.test(s))) return found;
   }
   await loadScript(LIBS.jsqr);
-  const maxSide = 1000, sc = Math.min(1, maxSide/Math.max(bitmap.width,bitmap.height));
-  const W = Math.round(bitmap.width*sc), H = Math.round(bitmap.height*sc);
-  const cv = document.createElement("canvas"); cv.width=W; cv.height=H;
-  const cx = cv.getContext("2d",{willReadFrequently:true}); cx.drawImage(bitmap,0,0,W,H);
-  const full = cx.getImageData(0,0,W,H);
-  const r0 = jsQR(full.data,W,H,{inversionAttempts:"dontInvert"}); if(r0) found.push(r0.data);
-  if(found.some(s=>INV_RE.test(s))) return found;
+  // 手機原圖很大、QR 很小：用兩種解析度、整張＋分區掃描
+  const levels = [1000, 2000].filter((m,i)=> i===0 || Math.max(bitmap.width,bitmap.height) > 1200).map(maxSide=>{
+    const sc = Math.min(1, maxSide/Math.max(bitmap.width,bitmap.height));
+    const W = Math.round(bitmap.width*sc), H = Math.round(bitmap.height*sc);
+    const cv = document.createElement("canvas"); cv.width=W; cv.height=H;
+    const cx = cv.getContext("2d",{willReadFrequently:true}); cx.drawImage(bitmap,0,0,W,H);
+    return {W, H, cx, fracs: maxSide===1000 ? [0.25,0.35,0.5] : [0.16,0.26]};
+  });
+  const hit = () => found.some(s=>INV_RE.test(s));
+  for(const L of levels){
+    const r0 = jsQR(L.cx.getImageData(0,0,L.W,L.H).data, L.W, L.H, {inversionAttempts:"dontInvert"});
+    if(r0){ found.push(r0.data); if(hit()) return found; }
+  }
   // 電子發票有左右兩個 QR，整張圖常常解不出來 → 分區掃描
-  for(const frac of [0.25,0.35,0.5]){
-    const ws = Math.round(Math.min(W,H)*frac), st = Math.max(8,Math.round(ws/3));
-    for(let y=0; y+ws<=H; y+=st){
-      for(let x=0; x+ws<=W; x+=st){
-        const img = cx.getImageData(x,y,ws,ws);
-        const r = jsQR(img.data,ws,ws,{inversionAttempts:"dontInvert"});
-        if(r){ found.push(r.data); if(INV_RE.test(r.data)) return found; }
+  for(const L of levels){
+    for(const frac of L.fracs){
+      const ws = Math.round(Math.min(L.W,L.H)*frac), st = Math.max(8,Math.round(ws/2.5));
+      for(let y=0; y+ws<=L.H; y+=st){
+        for(let x=0; x+ws<=L.W; x+=st){
+          const r = jsQR(L.cx.getImageData(x,y,ws,ws).data, ws, ws, {inversionAttempts:"dontInvert"});
+          if(r){ found.push(r.data); if(INV_RE.test(r.data)) return found; }
+        }
+        await new Promise(r=>setTimeout(r,0));
       }
-      await new Promise(r=>setTimeout(r,0));
     }
   }
   return found;
@@ -535,6 +558,11 @@ async function ocrRegion(bmp, r, kind){
   const best = Object.entries(votes).sort((a,b)=>b[1]-a[1])[0];
   return best ? {value: kind==="amount" ? +best[0] : best[0], sure: best[1] >= 2} : {value:"", sure:false, text:firstText};
 }
+function photoThumb(bmp){
+  const k = Math.min(1, 900/Math.max(bmp.width,bmp.height)), c = document.createElement("canvas");
+  c.width = Math.round(bmp.width*k); c.height = Math.round(bmp.height*k);
+  c.getContext("2d").drawImage(bmp,0,0,c.width,c.height); return c.toDataURL("image/jpeg",0.82);
+}
 function thumb(bmp, r){
   const pad = Math.round(r.h*0.15), x=Math.max(0,r.x-pad), y=Math.max(0,r.y-pad), w=Math.min(bmp.width-x,r.w+pad*2), h=Math.min(bmp.height-y,r.h+pad*2);
   const k = Math.min(1, 160/h, 900/w), c = document.createElement("canvas"); c.width=Math.round(w*k); c.height=Math.round(h*k);
@@ -657,6 +685,17 @@ function withDefaults(c){
   }
   return e;
 }
+function missing(e){
+  const m = [];
+  if(!e.date) m.push("日期");
+  if(e.amount==="" || e.amount==null || !(+e.amount>0)) m.push("金額");
+  if(!e.cat) m.push("類別");
+  if(!e.purpose) m.push("用途");
+  if(CATS[e.cat]?.sheet==="travel" && !e.area) m.push("出差地區");
+  if(e.cat==="transport" && (e.mode==="高鐵"||e.mode==="台鐵") && !e.route) m.push("路線");
+  return m;
+}
+const MISS_KEY = {"日期":"date","金額":"amount","類別":"cat","用途":"purpose","出差地區":"area","路線":"route"};
 function isDup(key){ return key && S.entries.some(e=>e.srcKey===key); }
 
 async function processFiles(files){
@@ -670,7 +709,7 @@ async function processFiles(files){
         busy(true, "讀取 PDF"+label, 0.3);
         const text = await pdfText(f);
         const r = parseTHSR(text) || [parseSingle(text)];
-        r.forEach(c=>cands.push(Object.assign(withDefaults(c), {_src:f.name})));
+        r.forEach(c=>cands.push(Object.assign(withDefaults(c), {_auto:true, _src:f.name})));
         continue;
       }
       busy(true, "掃描電子發票 QR Code"+label, 0.15);
@@ -680,34 +719,20 @@ async function processFiles(files){
       if(inv){
         const mem = S.sellers[inv.seller] || KNOWN_SELLERS[inv.seller] || {};
         cands.push(Object.assign(withDefaults({date:inv.date, amount:inv.amount, cat:mem.cat||"", mode:mem.mode||"", note:mem.note||"", purpose:mem.purpose||"",
-          area:mem.area||"", seller:inv.seller, srcKey:"inv:"+inv.inv}), {_src:`電子發票 ${inv.inv}（賣方統編 ${inv.seller}）`}));
+          area:mem.area||"", seller:inv.seller, srcKey:"inv:"+inv.inv}), {_auto:true, _src:`電子發票 ${inv.inv}（賣方統編 ${inv.seller}）`}));
         continue;
       }
       const isScreenshot = bmp.height / bmp.width > 1.9;   // 手機截圖（細長）直接整張辨識
       if(!isScreenshot){
-        busy(false);
-        const ch = await askCrop(bmp, label.replace(/[（）]/g,""));
-        if(ch.mode==="skip") continue;
-        if(ch.mode==="manual"){ cands.push(Object.assign(withDefaults({date:todayStr()}), {_src:f.name+"（手動輸入）"})); continue; }
-        if(ch.mode==="crop"){
-          busy(true, "辨識框選範圍"+label+"（第一次需載入辨識資料）", 0.4);
-          ocrProgress = (st,p)=> busy(true, "載入辨識資料"+label, 0.4+0.5*p);
-          const src = ch.img || bmp;
-          const A = ch.amount ? await ocrRegion(src, ch.amount, "amount") : {value:""};
-          const D = ch.date ? await ocrRegion(src, ch.date, "date") : {value:""};
-          const notes = [];
-          if(ch.amount && A.value==="") notes.push("金額沒讀到，請手動填");
-          else if(ch.amount && !A.sure) notes.push("金額不太確定，請核對");
-          if(ch.date && D.value==="") notes.push("日期沒讀到，先填今天");
-          cands.push(Object.assign(withDefaults({date: D.value || todayStr(), amount: A.value}), {_amtImg: ch.amount ? thumb(src, ch.amount) : "", _dateImg: ch.date ? thumb(src, ch.date) : "", _src:f.name+"（框選辨識）"+(notes.length ? "：" + notes.join("、") : "，請核對")}));
-          continue;
-        }
+        // 不是電子發票（二聯式、三聯式、手寫收據…）：看照片手動填，比自動辨識可靠
+        cands.push(Object.assign(withDefaults({}), {_photo: photoThumb(bmp), _manual:true, _src:f.name+"：不是電子發票，請看照片手動填寫"}));
+        continue;
       }
       busy(true, "辨識文字"+label+"（第一次需下載辨識資料）", 0.3);
       const text = await ocr(bmp, (st,p)=> busy(true, (/load|download|initial/i.test(st)?"下載辨識資料":"辨識文字")+label, 0.3+0.7*p));
       const list = parseTxnList(text);
-      if(list) list.forEach(c=>cands.push(Object.assign(withDefaults(c), {_src:f.name+"（交易紀錄截圖）"})));
-      else cands.push(Object.assign(withDefaults(parseSingle(text)), {_src:f.name+"（文字辨識，請仔細核對）"}));
+      if(list) list.forEach(c=>cands.push(Object.assign(withDefaults(c), {_auto:true, _src:f.name+"（交易紀錄截圖）"})));
+      else cands.push(Object.assign(withDefaults(parseSingle(text)), {_auto:true, _photo: photoThumb(bmp), _src:f.name+"（文字辨識，請仔細核對）"}));
     }catch(err){
       console.error(err);
       cands.push(Object.assign(withDefaults({}), {_src:f.name+"：無法辨識（"+(err.message||err)+"），請手動填寫"}));
@@ -732,6 +757,8 @@ function formHTML(e, i, single){
   const travel = CATS[e.cat]?.sheet==="travel";
   return `<div class="card cand ${chk?"":"off"}" data-i="${i}">
     ${single?"":`<div class="cand-h"><input type="checkbox" data-k="_on" ${chk?"checked":""} aria-label="要儲存這筆"><div class="src">${esc(e._src||"")}</div>${dup?'<span class="tag warn">可能重複</span>':""}</div>`}
+    ${e._photo ? `<a class="photo" href="${e._photo}" target="_blank" rel="noopener"><img src="${e._photo}" alt="單據照片"></a>` : ""}
+    ${e._auto ? `<div class="recheck">自動辨識的結果，請再核對一次金額和日期</div>` : ""}
     ${e._amtImg || e._dateImg ? `<div class="crop-thumbs">${e._amtImg?`<figure><img src="${e._amtImg}" alt="框選的金額"><figcaption>框選的金額</figcaption></figure>`:""}${e._dateImg?`<figure><img src="${e._dateImg}" alt="框選的日期"><figcaption>框選的日期</figcaption></figure>`:""}</div>` : ""}
     <div class="form">
       <label>日期<input type="date" data-k="date" value="${esc(e.date)}"></label>
@@ -739,11 +766,16 @@ function formHTML(e, i, single){
       <label class="full">類別<select data-k="cat">${catOpts}</select></label>
       <label ${e.cat==="transport"?"":"hidden"}>交通工具<select data-k="mode">${MODES.map(m=>`<option ${e.mode===m?"selected":""}>${m}</option>`).join("")}</select></label>
       <label ${e.cat==="meal"?"":"hidden"}>餐別<select data-k="meal">${Object.entries(MEALS).map(([k,v])=>`<option value="${k}" ${e.meal===k?"selected":""}>${v}</option>`).join("")}</select></label>
-      <label ${e.cat==="transport"?"":"hidden"}>路線（高鐵/台鐵）<input data-k="route" list="dlRoute" value="${esc(e.route)}" placeholder="桃園to台南"></label>
-      <label ${travel?"":"hidden"}>出差地區<input data-k="area" list="dlArea" value="${esc(e.area)}" placeholder="台南"></label>
-      <label class="full">用途 / 拜訪對象<input data-k="purpose" list="dlPurpose" value="${esc(e.purpose)}" placeholder="例：和Ryan拜訪翰霖、辦公室停車"></label>
+      <label ${e.cat==="transport"?"":"hidden"}>路線（高鐵/台鐵）<input data-k="route" list="dlRoute" value="${esc(e.route)}" placeholder="例：桃園to嘉義"></label>
+      <label ${travel?"":"hidden"}>出差地區<input data-k="area" list="dlArea" value="${esc(e.area)}" placeholder="例：嘉義"></label>
+      <label class="full">用途 / 拜訪對象<input data-k="purpose" list="dlPurpose" value="${esc(e.purpose)}" placeholder="${travel ? "例：和XXX拜訪XX" : "例：與XXX拜訪XX、辦公室停車"}">
+        ${travel ? `<small class="fmt">表單上會寫成：和XXX拜訪XX; 捷運(_)+高鐵(_): 桃園to嘉義</small>` : ""}</label>
       <label class="full">備註（地點、店家，只給自己看）<input data-k="note" value="${esc(e.note)}"></label>
     </div></div>`;
+}
+function markMissing(card, e){
+  const m = new Set(missing(e).map(x=>MISS_KEY[x]));
+  card.querySelectorAll("[data-k]").forEach(el=>{ const k=el.dataset.k; if(k==="_on") return; el.classList.toggle("miss", m.has(k)); });
 }
 function readForm(card, base){
   const e = Object.assign({}, base);
@@ -769,13 +801,15 @@ function openReview(items, title, editId){
     const i = +card.dataset.i;
     reviewItems[i] = readForm(card, reviewItems[i]);
     if(ev.target.dataset.k==="_on") card.classList.toggle("off", !ev.target.checked);
+    markMissing(card, reviewItems[i]);
     if(ev.target.dataset.k==="cat" || (ev.target.dataset.k==="route" && ev.type==="change")){
       if(ev.target.dataset.k==="route" && !reviewItems[i].area) reviewItems[i] = withDefaults(Object.assign({}, reviewItems[i], {area:""}));
       if(ev.target.dataset.k==="cat" && reviewItems[i].cat==="transport" && !reviewItems[i].mode) reviewItems[i].mode="捷運";
       const tmp = document.createElement("div"); tmp.innerHTML = formHTML(reviewItems[i], i, single);
-      card.replaceWith(tmp.firstElementChild);
+      const nc = tmp.firstElementChild; card.replaceWith(nc); markMissing(nc, reviewItems[i]);
     }
   };
+  body.querySelectorAll(".cand").forEach(c=> markMissing(c, reviewItems[+c.dataset.i]));
   if(editId){
     $("#btnDel").onclick = ev=> twoStep(ev.currentTarget, "再按一次確認刪除", ()=>{ S.entries = S.entries.filter(x=>x.id!==editId); save(); $("#dlgReview").close(); render(); toast("已刪除"); });
     $("#btnFav").onclick = ()=>{ const e = readForm(body.querySelector(".cand"), reviewItems[0]); addFav(e); };
@@ -788,7 +822,7 @@ $("#btnSaveReview").onclick = ()=>{
   const bad = items.filter(e=>!e.date || e.amount==="" || !(e.amount>0) || !e.cat);
   if(bad.length){ toast("請補齊日期、金額和類別"); return; }
   for(const e of items){
-    delete e._off; delete e._src; delete e._amtImg; delete e._dateImg;
+    delete e._off; delete e._src; delete e._amtImg; delete e._dateImg; delete e._photo; delete e._auto; delete e._manual;
     if(e.cat!=="transport") delete e.mode;
     if(e.cat!=="meal") delete e.meal;
     if(e.seller) S.sellers[e.seller] = {cat:e.cat, mode:e.mode||"", note:e.note, purpose:e.purpose, area:e.area};
@@ -831,9 +865,10 @@ function render(){
     const c = CATS[e.cat]; const old = monthsAgo(e.date) >= 4;
     const title = e.cat==="transport" ? (e.mode||"交通") : (c?.label||"未分類");
     const sub = [e.purpose, e.route, e.area && c?.sheet==="travel" ? e.area : "", e.note].filter(Boolean).join(" · ");
-    return `<button class="item" data-id="${e.id}"><div class="d">${+e.date.slice(5,7)}/${+e.date.slice(8,10)}</div>
+    const miss = missing(e);
+    return `<button class="item${miss.length?" has-miss":""}" data-id="${e.id}"><div class="d">${+e.date.slice(5,7)}/${+e.date.slice(8,10)}</div>
       <div class="m"><div class="t"><span class="tag">${c?.sheet==="car"?"汽車":"出差"}</span>${esc(title)}${old?' <span class="tag warn">超過4個月</span>':""}</div>
-      <div class="s">${esc(sub)||"（未填用途）"}</div></div><div class="a">${fmt(+e.amount)}</div></button>`;
+      <div class="s">${esc(sub)||"&nbsp;"}</div>${miss.length?`<div class="miss-t">漏填：${miss.join("、")}</div>`:""}</div><div class="a">${fmt(+e.amount)}</div></button>`;
   }).join("") : `<div class="empty">這個月還沒有資料。拍一張單據開始吧。</div>`;
   // 其他月份的資料（避免以為資料不見）
   const counts = {}; S.entries.forEach(e=>{ const k=(e.date||"").slice(0,7); if(k) counts[k]=(counts[k]||0)+1; });
@@ -1163,9 +1198,22 @@ async function download(blob, name){
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
 }
-$("#btnExport").onclick = async () => {
+$("#btnExport").onclick = () => {
   const m = curMonth();
   if(!S.settings.name){ toast("請先在設定填寫姓名"); $("#btnSettings").click(); return; }
+  const bad = monthEntries(m).map(e=>({e, miss:missing(e)})).filter(x=>x.miss.length);
+  if(bad.length){
+    $("#missBody").innerHTML = `<p style="margin:0">有 <b>${bad.length}</b> 筆資料漏填，匯出的表單會不完整：</p><ul class="miss-list">` +
+      bad.map(({e,miss})=>`<li><button class="item has-miss" data-id="${e.id}"><div class="d">${+e.date.slice(5,7)}/${+e.date.slice(8,10)}</div><div class="m"><div class="t">${esc(e.cat==="transport"?(e.mode||"交通"):(CATS[e.cat]?.label||"未分類"))}　${fmt(+e.amount||0)}</div><div class="miss-t">漏填：${miss.join("、")}</div></div></button></li>`).join("") + "</ul>";
+    $("#dlgMiss").showModal(); return;
+  }
+  doExport();
+};
+$("#missBody").onclick = ev => { const b = ev.target.closest("[data-id]"); if(!b) return; $("#dlgMiss").close(); const e = S.entries.find(x=>x.id===b.dataset.id); if(e) openReview([Object.assign({}, e)], "編輯", e.id); };
+$("#missFix").onclick = () => $("#dlgMiss").close();
+$("#missGo").onclick = () => { $("#dlgMiss").close(); doExport(); };
+async function doExport(){
+  const m = curMonth();
   try{
     busy(true, "產生 Excel…", 0.5);
     const {blob, rows} = await buildWorkbook(m);
@@ -1177,7 +1225,7 @@ $("#btnExport").onclick = async () => {
     }
     await download(blob, name); if(!window.claude) toast("已下載："+name);
   }catch(e){ busy(false); console.error(e); toast("產生失敗："+(e.message||e)); }
-};
+}
 
 /* ====== 啟動 ====== */
 (function init(){
