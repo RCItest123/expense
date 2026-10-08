@@ -6,6 +6,9 @@
 <meta name="theme-color" content="#1f6f5c">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>報帳小幫手</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-title" content="報帳小幫手">
 <style>
 :root{
   --bg:#f5f6f4;--card:#ffffff;--ink:#1d2421;--muted:#5f6b66;--line:#dfe3e0;
@@ -98,6 +101,22 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .preview{font-size:13px;border-collapse:collapse;width:100%}
 .preview td,.preview th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top}
 .preview td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.crop-wrap{flex-shrink:0;position:relative;display:flex;justify-content:center;background:var(--chip);border-radius:12px;overflow:hidden}
+#cropCanvas{touch-action:none;max-width:100%;height:auto;display:block;cursor:crosshair}
+.seg{display:flex;gap:8px}
+.seg button{flex:1}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+.crop-thumbs{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+.crop-thumbs figure{margin:0;display:flex;flex-direction:column;gap:2px;min-width:0}
+.crop-thumbs img{max-height:56px;max-width:100%;border-radius:6px;border:1px solid var(--line);background:#fff}
+.crop-thumbs figcaption{font-size:12px;color:var(--muted)}
+#banners{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+#banners:empty{display:none}
+.banner{background:var(--warn-soft);color:var(--warn);border-radius:12px;padding:10px 12px;font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.banner span{flex:1;min-width:200px}
+.banner button{min-height:36px;padding:6px 12px}
+.month-hint{font-size:13px;color:var(--muted);margin-top:8px}
+.month-hint button{min-height:0;padding:2px 10px;font-size:13px}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 @media (max-width:420px){.form{grid-template-columns:1fr}.sum b{font-size:16px}}
 </style>
@@ -110,6 +129,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 </div></header>
 
 <main>
+<div id="banners"></div>
 <section>
   <h2>新增單據</h2>
   <div class="add-grid">
@@ -144,6 +164,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     <div><span>出差旅費</span><b id="sumTravel">0</b></div>
     <div><span>合計 NT$</span><b id="sumAll">0</b></div>
   </div>
+  <div class="month-hint" id="monthHint"></div>
   <div class="list" id="list"></div>
 </section>
 
@@ -177,6 +198,20 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     <textarea id="pasteText" placeholder="貼上單據文字…"></textarea>
   </div>
   <div class="dlg-f"><button class="primary" id="btnParsePaste">辨識</button></div>
+</div></dialog>
+
+<dialog id="dlgCrop"><div class="dlg">
+  <div class="dlg-h"><h3 id="cropTitle">框出金額</h3><button class="ghost" id="cropSkip">略過這張</button></div>
+  <div class="dlg-b">
+    <p class="note" style="margin:0">用手指拖曳框住<b>金額</b>，接著框<b>日期</b>（可略過，預設今天）。框一行數字就好，避開灰底和框線；照片橫的先按「轉向」。</p>
+    <div class="seg"><button id="segAmt" aria-pressed="true">金額</button><button id="segDate" aria-pressed="false">日期</button><button id="cropRot" aria-label="旋轉 90 度" style="flex:0 0 auto">↻ 轉向</button></div>
+    <div class="crop-wrap"><canvas id="cropCanvas"></canvas></div>
+  </div>
+  <div class="dlg-f">
+    <button id="cropManual">直接手動輸入</button>
+    <button id="cropFull">整張自動辨識</button>
+    <button class="primary" id="cropGo" disabled>辨識框選範圍</button>
+  </div>
 </div></dialog>
 
 <dialog id="dlgPreview"><div class="dlg">
@@ -216,7 +251,7 @@ const L = p => new URL(p, location.href).href;
 const LIBS = USE_LOCAL_LIBS ? {
   jszip: L("lib/jszip.min.js"), jsqr: L("lib/jsQR.js"), tesseract: L("lib/tesseract/tesseract.min.js"),
   pdfjs: L("lib/pdf.min.mjs"), pdfjsWorker: L("lib/pdf.worker.min.mjs"),
-  tessOpts: {workerPath: L("lib/tesseract/worker.min.js"), corePath: L("lib/tesseract/core"), langPath: L("lib/tesseract/chi_tra.wasm")+"#"}  // 用 # 讓下載網址固定指向這個檔,
+  tessOpts: {workerPath: L("lib/tesseract/worker.min.js"), corePath: L("lib/tesseract/core"), langPath: L("lib/tesseract/chi_tra.wasm")+"#"}  // eng 另外用 eng.wasm  // 用 # 讓下載網址固定指向這個檔,
 } : {
   jszip: "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
   jsqr: "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js",
@@ -253,6 +288,7 @@ function load(){
   try{ const raw = localStorage.getItem(KEY); if(raw){ const d = JSON.parse(raw); return Object.assign(blank(), d, {settings:Object.assign(blank().settings, d.settings||{})}); } }catch(e){}
   return blank();
 }
+const STORAGE_OK = (()=>{ try{ localStorage.setItem(KEY+".t","1"); const ok = localStorage.getItem(KEY+".t")==="1"; localStorage.removeItem(KEY+".t"); return ok; }catch(e){ return false; } })();
 function save(){
   try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast("無法儲存：瀏覽器不允許本機儲存"); }
 }
@@ -320,13 +356,17 @@ async function decodeQRs(bitmap){
 
 /* ====== 辨識：文字（OCR） ====== */
 let ocrWorker = null;
-async function ocr(bitmapOrCanvas, onProgress){
+let ocrProgress = null;
+async function ensureOcr(){
   await loadScript(LIBS.tesseract);
   if(!ocrWorker){
     ocrWorker = await Tesseract.createWorker(["chi_tra"], 1, Object.assign({}, LIBS.tessOpts, {
-      logger: m => { if(onProgress && m.progress!=null) onProgress(m.status, m.progress); }
+      logger: m => { if(ocrProgress && m.progress!=null) ocrProgress(m.status, m.progress); }
     }));
   }
+}
+async function ocr(bitmapOrCanvas, onProgress){
+  ocrProgress = onProgress; await ensureOcr();
   const cv = document.createElement("canvas");
   const sc = Math.min(1, 2000/Math.max(bitmapOrCanvas.width,bitmapOrCanvas.height));
   cv.width = Math.round(bitmapOrCanvas.width*sc); cv.height = Math.round(bitmapOrCanvas.height*sc);
@@ -334,6 +374,187 @@ async function ocr(bitmapOrCanvas, onProgress){
   const r = await ocrWorker.recognize(cv);
   return r.data.text || "";
 }
+/* ====== 框選辨識（二聯式／三聯式等傳統發票） ====== */
+function rotate90(src){
+  const c = document.createElement("canvas"); c.width = src.height; c.height = src.width;
+  const x = c.getContext("2d"); x.translate(c.width, 0); x.rotate(Math.PI/2); x.drawImage(src, 0, 0); return c;
+}
+function askCrop(bmp0, title){
+  return new Promise(resolve=>{
+    const dlg = $("#dlgCrop"), cv = $("#cropCanvas"), cx = cv.getContext("2d");
+    $("#cropTitle").textContent = "框出金額" + (title ? "　" + title : "");
+    const maxW = Math.min(window.innerWidth - 64, 600), maxH = Math.max(240, window.innerHeight * 0.5);
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    let bmp = bmp0, sc = 1;                                                          // sc：原圖 → 畫布像素
+    function layout(){
+      const sc0 = Math.min(maxW / bmp.width, maxH / bmp.height, 1); sc = sc0 * dpr;
+      cv.width = Math.round(bmp.width * sc); cv.height = Math.round(bmp.height * sc);
+      cv.style.width = Math.round(bmp.width * sc0) + "px";
+    }
+    layout();
+    const rects = {amount:null, date:null}; let mode = "amount", drag = null;
+    const css = getComputedStyle(document.documentElement);
+    function draw(){
+      cx.drawImage(bmp, 0, 0, cv.width, cv.height);
+      [["amount","#1f8a6d","金額"],["date","#c27c0e","日期"]].forEach(([k,col,lab])=>{
+        const r = rects[k]; if(!r) return;
+        cx.fillStyle = col + "33"; cx.fillRect(r.x, r.y, r.w, r.h);
+        cx.strokeStyle = col; cx.lineWidth = 2*dpr; cx.strokeRect(r.x, r.y, r.w, r.h);
+        cx.fillStyle = col; cx.font = `bold ${13*dpr}px sans-serif`; cx.fillText(lab, r.x + 3*dpr, Math.max(13*dpr, r.y - 4*dpr));
+      });
+    }
+    function setMode(m){ mode = m; $("#segAmt").setAttribute("aria-pressed", m==="amount"); $("#segDate").setAttribute("aria-pressed", m==="date"); $("#cropTitle").textContent = (m==="amount"?"框出金額":"框出日期") + (title ? "　" + title : ""); }
+    function pos(ev){ const b = cv.getBoundingClientRect(); return {x:(ev.clientX-b.left)*cv.width/b.width, y:(ev.clientY-b.top)*cv.height/b.height}; }
+    cv.onpointerdown = ev => { cv.setPointerCapture(ev.pointerId); drag = pos(ev); };
+    cv.onpointermove = ev => { if(!drag) return; const p = pos(ev); rects[mode] = {x:Math.min(drag.x,p.x), y:Math.min(drag.y,p.y), w:Math.abs(p.x-drag.x), h:Math.abs(p.y-drag.y)}; draw(); };
+    cv.onpointerup = cv.onpointercancel = () => {
+      drag = null; const r = rects[mode];
+      if(r && (r.w < 6*dpr || r.h < 4*dpr)) rects[mode] = null;
+      draw(); $("#cropGo").disabled = !rects.amount && !rects.date;
+      if(mode==="amount" && rects.amount && !rects.date) setMode("date");
+    };
+    $("#segAmt").onclick = () => setMode("amount");
+    $("#segDate").onclick = () => setMode("date");
+    $("#cropRot").onclick = () => { bmp = rotate90(bmp); rects.amount = rects.date = null; layout(); setMode("amount"); draw(); $("#cropGo").disabled = true; };
+    $("#cropGo").disabled = true;
+    const toImg = r => r && {x:r.x/sc, y:r.y/sc, w:r.w/sc, h:r.h/sc};
+    const done = v => { dlg.onclose = null; dlg.close(); resolve(v); };
+    $("#cropGo").onclick = () => done({mode:"crop", img:bmp, amount:toImg(rects.amount), date:toImg(rects.date)});
+    $("#cropFull").onclick = () => done({mode:"full"});
+    $("#cropManual").onclick = () => done({mode:"manual"});
+    $("#cropSkip").onclick = () => done({mode:"skip"});
+    dlg.onclose = () => resolve({mode:"skip"});
+    setMode("amount"); draw(); dlg.showModal();
+    window.__crop = {rects, get sc(){ return sc; }, setRect:(k,r)=>{ rects[k]=r; draw(); $("#cropGo").disabled=false; }};
+  });
+}
+/* 裁切＋放大＋黑白化，讓數字更好認 */
+function prepCrop(bmp, r, opt, trimmed){
+  opt = opt || {};
+  const pad = 4, x = Math.max(0, r.x - pad), y = Math.max(0, r.y - pad);
+  const w = Math.min(bmp.width - x, r.w + pad*2), h = Math.min(bmp.height - y, r.h + pad*2);
+  const k = Math.max(0.3, Math.min(6, (trimmed ? (opt.th || 125) : 100) / Math.max(1, h)));   // 讓字高大約 90~100px
+  const W = Math.max(1, Math.round(w*k)), H = Math.max(1, Math.round(h*k)), B = 30;
+  const cv = document.createElement("canvas"); cv.width = W + B*2; cv.height = H + B*2;
+  const c = cv.getContext("2d", {willReadFrequently:true});
+  c.fillStyle = "#fff"; c.fillRect(0,0,cv.width,cv.height);
+  c.imageSmoothingQuality = "high"; c.drawImage(bmp, x, y, w, h, B, B, W, H);
+  const img = c.getImageData(B,B,W,H), d = img.data;
+  let g = new Float32Array(W*H);
+  for(let i=0,p=0;i<d.length;i+=4,p++) g[p] = 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+  if(opt.blur){                                                       // 模糊：把點陣的點糊成線
+    const R = opt.blur, t = new Float32Array(W*H);
+    for(let yy=0;yy<H;yy++){ let acc=0,n=0; for(let xx=-R;xx<W;xx++){ if(xx+R<W){acc+=g[yy*W+xx+R];n++;} if(xx-R-1>=0){acc-=g[yy*W+xx-R-1];n--;} if(xx>=0) t[yy*W+xx]=acc/n; } }
+    for(let xx=0;xx<W;xx++){ let acc=0,n=0; for(let yy=-R;yy<H;yy++){ if(yy+R<H){acc+=t[(yy+R)*W+xx];n++;} if(yy-R-1>=0){acc-=t[(yy-R-1)*W+xx];n--;} if(yy>=0) g[yy*W+xx]=acc/n; } }
+  }
+  let ink = new Uint8Array(W*H);
+  if(opt.bin === "adapt"){
+    // 區域門檻：比周圍平均暗一截才算墨水（處理灰底網點、光線不均）
+    const R = Math.max(10, Math.round(Math.min(H, 120) * 0.3)), C = opt.c || 14;
+    const S = new Float64Array((W+1)*(H+1));
+    for(let yy=0;yy<H;yy++){ let row=0; for(let xx=0;xx<W;xx++){ row += g[yy*W+xx]; S[(yy+1)*(W+1)+xx+1] = S[yy*(W+1)+xx+1] + row; } }
+    for(let yy=0;yy<H;yy++){ const y0=Math.max(0,yy-R), y1=Math.min(H,yy+R+1);
+      for(let xx=0;xx<W;xx++){ const x0=Math.max(0,xx-R), x1=Math.min(W,xx+R+1);
+        const m = (S[y1*(W+1)+x1]-S[y0*(W+1)+x1]-S[y1*(W+1)+x0]+S[y0*(W+1)+x0]) / ((y1-y0)*(x1-x0));
+        ink[yy*W+xx] = g[yy*W+xx] < m - C ? 1 : 0; } }
+  } else {
+  // Otsu 自動門檻（只看框內）
+  const hist = new Array(256).fill(0); for(let p=0;p<W*H;p++) hist[Math.max(0,Math.min(255,g[p]|0))]++;
+  const tot = W*H; let sum=0; for(let t=0;t<256;t++) sum+=t*hist[t];
+  let sB=0,wB=0,best=0,th=128; for(let t=0;t<256;t++){ wB+=hist[t]; if(!wB) continue; const wF=tot-wB; if(!wF) break; sB+=t*hist[t]; const mB=sB/wB, mF=(sum-sB)/wF, v=wB*wF*(mB-mF)*(mB-mF); if(v>best){best=v;th=t;} }
+  let dark = 0;
+  for(let p=0;p<W*H;p++){ if(g[p] < th){ ink[p]=1; dark++; } }
+  if(dark > tot/2) for(let p=0;p<W*H;p++) ink[p] ^= 1;                // 深底淺字時反轉
+  }
+  // 去掉碰到框邊的長線（表格線、框線）
+  for(let yy=0;yy<H;yy++){ let n=0; for(let xx=0;xx<W;xx++) n+=ink[yy*W+xx]; if(n > W*0.6) for(let xx=0;xx<W;xx++) ink[yy*W+xx]=0; }
+  for(let xx=0;xx<W;xx++){ let n=0; for(let yy=0;yy<H;yy++) n+=ink[yy*W+xx]; if(n > H*0.6) for(let xx2=Math.max(0,xx-2);xx2<=Math.min(W-1,xx+2);xx2++) for(let yy=0;yy<H;yy++) ink[yy*W+xx2]=0; }
+  // 只留墨水最多的那一行（去掉框到的上下雜線）
+  if(!trimmed && !opt.multi){
+    const rows = new Array(H).fill(0); for(let yy=0;yy<H;yy++){ let n=0; for(let xx=0;xx<W;xx++) n+=ink[yy*W+xx]; rows[yy]=n; }
+    const on = rows.map(n => n > W*0.004), gap = Math.max(3, Math.round(H*0.06)); const bands = [];
+    let s0=-1, last=-1;
+    for(let yy=0;yy<H;yy++){ if(on[yy]){ if(s0<0) s0=yy; else if(yy-last>gap){ bands.push([s0,last]); s0=yy; } last=yy; } }
+    if(s0>=0) bands.push([s0,last]);
+    if(bands.length){
+      const score = b => { let t=0; for(let yy=b[0];yy<=b[1];yy++) t+=rows[yy]; return t; };
+      const bb = bands.sort((a,b)=>score(b)-score(a))[0], m = Math.round((bb[1]-bb[0]+1)*0.15)+2;
+      const y0 = Math.max(0, bb[0]-m), y1 = Math.min(H-1, bb[1]+m);
+      // 左右也裁到有字的範圍
+      let x0 = W, x1 = -1;
+      for(let xx=0;xx<W;xx++){ let n=0; for(let yy=bb[0];yy<=bb[1];yy++) n+=ink[yy*W+xx]; if(n>=2){ if(xx<x0) x0=xx; x1=xx; } }
+      if(x1 < 0){ x0 = 0; x1 = W-1; }
+      const mx = Math.round((bb[1]-bb[0]+1)*0.3);
+      x0 = Math.max(0, x0-mx); x1 = Math.min(W-1, x1+mx);
+      return prepCrop(bmp, {x:x + x0/k, y:y + y0/k, w:(x1-x0+1)/k, h:(y1-y0+1)/k}, opt, true);
+    }
+  }
+  const morph = (src, R, grow) => {                                   // 加粗(grow)／變細
+    if(!R) return src; const out = new Uint8Array(W*H);
+    for(let yy=0;yy<H;yy++) for(let xx=0;xx<W;xx++){
+      let v = grow ? 0 : 1;
+      for(let dy=-R; dy<=R && (grow ? !v : v); dy++){ const y2=yy+dy; if(y2<0||y2>=H){ if(!grow) v=0; continue; }
+        for(let dx=-R; dx<=R; dx++){ const x2=xx+dx; const s = (x2<0||x2>=W) ? 0 : src[y2*W+x2]; if(grow && s){ v=1; break; } if(!grow && !s){ v=0; break; } } }
+      out[yy*W+xx] = v;
+    }
+    return out;
+  };
+  ink = morph(morph(ink, opt.dil||0, true), opt.ero||0, false);
+  for(let i=0,p=0;i<d.length;i+=4,p++){ const v = ink[p] ? 0 : 255; d[i]=d[i+1]=d[i+2]=v; }
+  c.putImageData(img,B,B);
+  return {canvas:cv, singleLine: W/H > 2.2 || trimmed};
+}
+/* 數字專用的辨識器（英文模型認數字比中文模型準） */
+let digitWorker = null;
+async function ensureDigits(){
+  await loadScript(LIBS.tesseract);
+  if(!digitWorker){
+    digitWorker = await Tesseract.createWorker(["eng"], 1, Object.assign({}, LIBS.tessOpts, LIBS.tessOpts.langPath ? {langPath: L("lib/tesseract/eng.wasm")+"#"} : {}, {
+      logger: m => { if(ocrProgress && m.progress!=null) ocrProgress(m.status, m.progress); }
+    }));
+  }
+}
+const CROP_VARIANTS = [{th:160, bin:"adapt", blur:2}, {th:160, bin:"adapt", blur:1, dil:2}, {th:180, dil:3}, {th:180, bin:"adapt", blur:2}, {th:140, bin:"adapt", blur:1, dil:2}];
+async function ocrRegion(bmp, r, kind){
+  await ensureDigits();
+  if(kind==="date") await ensureOcr();
+  const pick = kind==="amount" ? pickAmount : pickDate;
+  const votes = {}; let firstText = "";
+  const add = t => { if(!firstText) firstText = t; const val = pick(t); if(val !== "") votes[val] = (votes[val]||0) + 1; };
+  for(const v of CROP_VARIANTS){                       // 幾種處理方式各辨識一次，取最多票的結果
+    const {canvas, singleLine} = prepCrop(bmp, r, v);
+    const psm = singleLine ? "7" : "6";
+    await digitWorker.setParameters({tessedit_char_whitelist: kind==="amount" ? "0123456789,.$" : "0123456789-/.:", tessedit_pageseg_mode: psm});
+    add((await digitWorker.recognize(canvas)).data.text || "");
+    if(kind==="date"){                                 // 日期常有「年月日」中文字，再用中文模型讀一次
+      await ocrWorker.setParameters({tessedit_char_whitelist:"", tessedit_pageseg_mode: psm});
+      add((await ocrWorker.recognize(canvas)).data.text || "");
+      await ocrWorker.setParameters({tessedit_pageseg_mode:"6"});
+    }
+  }
+  const best = Object.entries(votes).sort((a,b)=>b[1]-a[1])[0];
+  return best ? {value: kind==="amount" ? +best[0] : best[0], sure: best[1] >= 2} : {value:"", sure:false, text:firstText};
+}
+function thumb(bmp, r){
+  const pad = Math.round(r.h*0.15), x=Math.max(0,r.x-pad), y=Math.max(0,r.y-pad), w=Math.min(bmp.width-x,r.w+pad*2), h=Math.min(bmp.height-y,r.h+pad*2);
+  const k = Math.min(1, 160/h, 900/w), c = document.createElement("canvas"); c.width=Math.round(w*k); c.height=Math.round(h*k);
+  c.getContext("2d").drawImage(bmp,x,y,w,h,0,0,c.width,c.height); return c.toDataURL("image/jpeg",0.8);
+}
+function pickAmount(text){
+  const nums = (text.replace(/\s/g,"").match(/\d[\d,]*(?:\.\d+)?/g)||[]).map(s=>+s.replace(/,/g,"")).filter(v=>v>0 && v<1000000);
+  if(!nums.length) return "";
+  const cnt = {}; nums.forEach(v=>cnt[v]=(cnt[v]||0)+1);          // 框到好幾行時，取出現最多次的金額
+  const top = Object.entries(cnt).sort((a,b)=>b[1]-a[1] || b[0]-a[0])[0];
+  return top[1] > 1 ? +top[0] : Math.max(...nums);
+}
+function pickDate(text){
+  const t = cleanText(text).replace(/\s+/g,"");
+  let d = findDate(t); if(d) return d;
+  const m = t.match(/(1[01]\d|20\d{2})(\d{2})(\d{2})/); if(m) return normDate(m[1],m[2],m[3]);
+  const g = cleanText(text).match(/(1[01]\d|20\d{2})\D{1,3}(\d{1,2})\D{1,3}(\d{1,2})/); if(g) return normDate(g[1],g[2],g[3]);
+  return "";
+}
+
 function cleanText(t){
   return (t||"").replace(/\r/g,"")
     .replace(/([㐀-鿿＀-￯（）])[ \t]+(?=[㐀-鿿＀-￯（）])/g,"$1")
@@ -462,6 +683,26 @@ async function processFiles(files){
           area:mem.area||"", seller:inv.seller, srcKey:"inv:"+inv.inv}), {_src:`電子發票 ${inv.inv}（賣方統編 ${inv.seller}）`}));
         continue;
       }
+      const isScreenshot = bmp.height / bmp.width > 1.9;   // 手機截圖（細長）直接整張辨識
+      if(!isScreenshot){
+        busy(false);
+        const ch = await askCrop(bmp, label.replace(/[（）]/g,""));
+        if(ch.mode==="skip") continue;
+        if(ch.mode==="manual"){ cands.push(Object.assign(withDefaults({date:todayStr()}), {_src:f.name+"（手動輸入）"})); continue; }
+        if(ch.mode==="crop"){
+          busy(true, "辨識框選範圍"+label+"（第一次需載入辨識資料）", 0.4);
+          ocrProgress = (st,p)=> busy(true, "載入辨識資料"+label, 0.4+0.5*p);
+          const src = ch.img || bmp;
+          const A = ch.amount ? await ocrRegion(src, ch.amount, "amount") : {value:""};
+          const D = ch.date ? await ocrRegion(src, ch.date, "date") : {value:""};
+          const notes = [];
+          if(ch.amount && A.value==="") notes.push("金額沒讀到，請手動填");
+          else if(ch.amount && !A.sure) notes.push("金額不太確定，請核對");
+          if(ch.date && D.value==="") notes.push("日期沒讀到，先填今天");
+          cands.push(Object.assign(withDefaults({date: D.value || todayStr(), amount: A.value}), {_amtImg: ch.amount ? thumb(src, ch.amount) : "", _dateImg: ch.date ? thumb(src, ch.date) : "", _src:f.name+"（框選辨識）"+(notes.length ? "：" + notes.join("、") : "，請核對")}));
+          continue;
+        }
+      }
       busy(true, "辨識文字"+label+"（第一次需下載辨識資料）", 0.3);
       const text = await ocr(bmp, (st,p)=> busy(true, (/load|download|initial/i.test(st)?"下載辨識資料":"辨識文字")+label, 0.3+0.7*p));
       const list = parseTxnList(text);
@@ -491,6 +732,7 @@ function formHTML(e, i, single){
   const travel = CATS[e.cat]?.sheet==="travel";
   return `<div class="card cand ${chk?"":"off"}" data-i="${i}">
     ${single?"":`<div class="cand-h"><input type="checkbox" data-k="_on" ${chk?"checked":""} aria-label="要儲存這筆"><div class="src">${esc(e._src||"")}</div>${dup?'<span class="tag warn">可能重複</span>':""}</div>`}
+    ${e._amtImg || e._dateImg ? `<div class="crop-thumbs">${e._amtImg?`<figure><img src="${e._amtImg}" alt="框選的金額"><figcaption>框選的金額</figcaption></figure>`:""}${e._dateImg?`<figure><img src="${e._dateImg}" alt="框選的日期"><figcaption>框選的日期</figcaption></figure>`:""}</div>` : ""}
     <div class="form">
       <label>日期<input type="date" data-k="date" value="${esc(e.date)}"></label>
       <label>金額 NT$<input type="number" inputmode="decimal" data-k="amount" value="${esc(e.amount)}"></label>
@@ -546,7 +788,7 @@ $("#btnSaveReview").onclick = ()=>{
   const bad = items.filter(e=>!e.date || e.amount==="" || !(e.amount>0) || !e.cat);
   if(bad.length){ toast("請補齊日期、金額和類別"); return; }
   for(const e of items){
-    delete e._off; const src = e._src; delete e._src;
+    delete e._off; delete e._src; delete e._amtImg; delete e._dateImg;
     if(e.cat!=="transport") delete e.mode;
     if(e.cat!=="meal") delete e.meal;
     if(e.seller) S.sellers[e.seller] = {cat:e.cat, mode:e.mode||"", note:e.note, purpose:e.purpose, area:e.area};
@@ -555,7 +797,7 @@ $("#btnSaveReview").onclick = ()=>{
   }
   save(); $("#dlgReview").close();
   const m = items[0]?.date?.slice(0,7);
-  if(m && m!==curMonth() && !reviewEditId){ $("#month").value = m; }
+  if(m && m!==curMonth() && !reviewEditId){ $("#month").value = m; rememberMonth(); }
   render(); toast(reviewEditId ? "已更新" : `已儲存 ${items.length} 筆`);
 };
 
@@ -593,12 +835,39 @@ function render(){
       <div class="m"><div class="t"><span class="tag">${c?.sheet==="car"?"汽車":"出差"}</span>${esc(title)}${old?' <span class="tag warn">超過4個月</span>':""}</div>
       <div class="s">${esc(sub)||"（未填用途）"}</div></div><div class="a">${fmt(+e.amount)}</div></button>`;
   }).join("") : `<div class="empty">這個月還沒有資料。拍一張單據開始吧。</div>`;
+  // 其他月份的資料（避免以為資料不見）
+  const counts = {}; S.entries.forEach(e=>{ const k=(e.date||"").slice(0,7); if(k) counts[k]=(counts[k]||0)+1; });
+  const others = Object.keys(counts).filter(k=>k!==m).sort().reverse();
+  $("#monthHint").innerHTML = others.length ? "其他月份：" + others.map(k=>`<button class="chip" data-m="${k}">${+k.slice(0,4)}/${+k.slice(5)}（${counts[k]} 筆）</button>`).join(" ") : "";
+  renderBanners();
   const s = S.settings;
   $("#exportInfo").textContent = s.name ? `檔名：${fileName(m)}` : "請先到右上角「設定」填寫姓名。";
   $("#exportWarn").innerHTML = "";
   $("#btnExport").disabled = !list.length;
   $("#btnPreview").disabled = !list.length;
 }
+$("#monthHint").onclick = ev => { const b = ev.target.closest("[data-m]"); if(b){ $("#month").value = b.dataset.m; rememberMonth(); render(); } };
+function rememberMonth(){ try{ sessionStorage.setItem(KEY+".month", curMonth()); localStorage.setItem(KEY+".month", curMonth()); }catch(e){} }
+const IN_APP = /\bLine\/|FBAN|FBAV|Instagram|MicroMessenger/i.test(navigator.userAgent);
+const STANDALONE = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+const IS_MOBILE = /Android|iPhone|iPad/i.test(navigator.userAgent);
+let dismissed = {};
+function renderBanners(){
+  const out = [];
+  if(!STORAGE_OK) out.push({id:"storage", text:"這個瀏覽器不允許保存資料（可能是無痕模式），重新整理後資料會不見。請改用一般模式的 Safari 或 Chrome 開啟。"});
+  else if(IN_APP) out.push({id:"inapp", text:"你正在 LINE 等 App 裡開啟，資料可能不會保存。請改用 Safari 或 Chrome 開啟這個網址。", btn:"用瀏覽器開啟", act:"openExt"});
+  else if(IS_MOBILE && !STANDALONE && !window.claude && S.entries.length) out.push({id:"a2hs", text:/iPhone|iPad/.test(navigator.userAgent) ? "建議按 Safari 下方的分享鍵 →「加入主畫面」，之後從主畫面圖示開啟，資料最不容易被清掉。" : "建議在瀏覽器選單選「加到主畫面」，之後從主畫面圖示開啟。", btn:"知道了", act:"dismiss"});
+  const day = new Date().getDate(), last = S.lastBackup ? (Date.now() - S.lastBackup) / 86400000 : 999;
+  if(STORAGE_OK && S.entries.length >= 5 && day >= 15 && last > 14) out.push({id:"backup", text:"這個月記了不少筆，建議匯出一份備份，換手機或清除瀏覽器資料時才救得回來。", btn:"匯出備份", act:"backup"});
+  $("#banners").innerHTML = out.filter(b=>!dismissed[b.id]).map(b=>`<div class="banner"><span>${esc(b.text)}</span>${b.btn?`<button data-act="${b.act}" data-id="${b.id}">${b.btn}</button>`:""}</div>`).join("");
+}
+$("#banners").onclick = ev => {
+  const b = ev.target.closest("[data-act]"); if(!b) return;
+  if(b.dataset.act==="openExt"){ const u = new URL(location.href); u.searchParams.set("openExternalBrowser","1"); location.href = u.href; }
+  if(b.dataset.act==="dismiss"){ dismissed[b.dataset.id]=1; try{ localStorage.setItem(KEY+".dis."+b.dataset.id,"1"); }catch(e){} renderBanners(); }
+  if(b.dataset.act==="backup"){ $("#btnBackup").click(); }
+};
+try{ ["a2hs"].forEach(id=>{ if(localStorage.getItem(KEY+".dis."+id)) dismissed[id]=1; }); }catch(e){}
 $("#list").onclick = ev => {
   const b = ev.target.closest("[data-id]"); if(!b) return;
   const e = S.entries.find(x=>x.id===b.dataset.id); if(!e) return;
@@ -630,7 +899,7 @@ $("#btnSettings").onclick = () => {
   save(); $("#sFile").textContent = fileName(curMonth()); render();
 });
 $("#dlgSettings").addEventListener("close", render);
-$("#btnBackup").onclick = () => { download(new Blob([JSON.stringify(S,null,1)],{type:"application/json"}), `報帳小幫手備份-${todayStr()}.json`); };
+$("#btnBackup").onclick = () => { S.lastBackup = Date.now(); save(); renderBanners(); download(new Blob([JSON.stringify(S,null,1)],{type:"application/json"}), `報帳小幫手備份-${todayStr()}.json`); };
 $("#fRestore").onchange = async ev => {
   const f = ev.target.files[0]; ev.target.value=""; if(!f) return;
   try{
@@ -912,8 +1181,17 @@ $("#btnExport").onclick = async () => {
 
 /* ====== 啟動 ====== */
 (function init(){
-  const d = new Date(); $("#month").value = `${d.getFullYear()}-${pad(d.getMonth()+1)}`;
-  $("#month").onchange = render;
+  // 在 LINE 裡打開時，自動改用手機瀏覽器開（LINE 支援 openExternalBrowser=1）
+  if(/\bLine\//i.test(navigator.userAgent) && !/openExternalBrowser=1/.test(location.search) && !window.claude){
+    const u = new URL(location.href); u.searchParams.set("openExternalBrowser","1"); location.replace(u.href);
+  }
+  const d = new Date(); const cur = `${d.getFullYear()}-${pad(d.getMonth()+1)}`;
+  let m = null; try{ m = sessionStorage.getItem(KEY+".month") || null; }catch(e){}
+  // 這個月還沒資料時，打開最近有資料的月份（例如月初整理上個月）
+  if(!m){ const months = [...new Set(S.entries.map(e=>(e.date||"").slice(0,7)).filter(Boolean))].sort();
+    m = months.includes(cur) || !months.length ? cur : months[months.length-1]; }
+  $("#month").value = m;
+  $("#month").onchange = () => { rememberMonth(); render(); };
   renderFavs(); render();
   window.__app = {S, buildRows, buildWorkbook, parseInvoiceQR, parseTxnList, parseTHSR, parseSingle, processFiles};
 })();
